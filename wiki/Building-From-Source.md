@@ -34,13 +34,14 @@ If you are on Linux, install these additional packages:
   * `dev-lang/rust >= 1.72`
   * `media-video/pipewire [jacksdk]`
 
-* **Debian 12 / Ubuntu 20.04 / Pop!\_OS 20.04**
+* **Debian 12 / Ubuntu 20.04, 24.04 / Pop!\_OS 20.04**
   
   ```bash
-  sudo apt install pulseaudio-utils build-essential pkg-config libclang-dev libssl-dev libasound2-dev libjack-dev libgtk-3-dev libvulkan-dev libunwind-dev gcc yasm nasm curl libx264-dev libx265-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libspeechd-dev libxkbcommon-dev libdrm-dev libva-dev libvulkan-dev vulkan-headers libpipewire-0.3-dev libspa-0.3-dev git
+  sudo apt install pulseaudio-utils build-essential pkg-config libclang-dev libssl-dev libasound2-dev libjack-dev libgtk-3-dev libvulkan-dev libunwind-dev gcc yasm nasm curl libx264-dev libx265-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libspeechd-dev libxkbcommon-dev libdrm-dev libva-dev libpipewire-0.3-dev libspa-0.2-dev git
   ```
 
-  * Note: Libpipewire/libspa must be at least 0.3.49 version - make sure to use upstream pipewire <https://github.com/pipewire-debian/pipewire-debian>
+  * `vulkan-headers` is not required; `libvulkan-dev` provides Vulkan headers on Debian/Ubuntu.
+  * Use `libspa-0.2-dev` (not `libspa-0.3-dev`) on stock repositories. Libpipewire/libspa must be at least 0.3.49 at runtime—for that, use [upstream pipewire](https://github.com/pipewire-debian/pipewire-debian) and install `libpipewire-0.3-dev` and `libspa-0.3-dev` from there.
 
 * **Fedora**
   
