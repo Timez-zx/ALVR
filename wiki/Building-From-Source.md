@@ -5,6 +5,7 @@ ALVR can be built on Windows and Linux. The following instructions are for both 
 Preferred IDE (optional): Visual Studio Code with rust-analyzer extension
 
 You need to install [rustup](https://www.rust-lang.org/tools/install).
+`curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`
 
 On Windows you also need [Chocolatey](https://chocolatey.org/install).
 
@@ -37,7 +38,7 @@ If you are on Linux, install these additional packages:
 * **Debian 12 / Ubuntu 20.04, 24.04 / Pop!\_OS 20.04**
   
   ```bash
-  sudo apt install pulseaudio-utils build-essential pkg-config libclang-dev libssl-dev libasound2-dev libjack-dev libgtk-3-dev libvulkan-dev libunwind-dev gcc yasm nasm curl libx264-dev libx265-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libspeechd-dev libxkbcommon-dev libdrm-dev libva-dev libpipewire-0.3-dev libspa-0.2-dev git
+  sudo apt install pulseaudio-utils build-essential pkg-config libclang-dev libssl-dev libasound2-dev libjack-dev libgtk-3-dev libvulkan-dev libunwind-dev gcc yasm nasm curl libx264-dev libx265-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libspeechd-dev libxkbcommon-dev libdrm-dev libva-dev libpipewire-0.3-dev libspa-0.2-dev git unzip
   ```
 
   * `vulkan-headers` is not required; `libvulkan-dev` provides Vulkan headers on Debian/Ubuntu.
