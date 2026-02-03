@@ -78,3 +78,10 @@ From the repo root:
 cargo xtask prepare-deps --platform android
 cargo xtask build-client --release
 ```
+
+For cleaning,
+
+```bash
+cargo xtask clean
+cargo clean
+```
