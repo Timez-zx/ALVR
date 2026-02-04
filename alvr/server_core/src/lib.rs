@@ -148,7 +148,7 @@ pub fn create_recording_file(connection_context: &ConnectionContext, settings: &
 
 pub fn create_latency_log_file(connection_context: &ConnectionContext) {
     let path = FILESYSTEM_LAYOUT.get().unwrap().log_dir.join(format!(
-        "motion_to_photon_{}.csv",
+        "latency_log_{}.csv",
         chrono::Local::now().format("%F.%H-%M-%S")
     ));
 
@@ -157,14 +157,14 @@ pub fn create_latency_log_file(connection_context: &ConnectionContext) {
             let mut writer = BufWriter::new(file);
 
             // Write CSV header
-            if let Err(e) = writeln!(writer, "timestamp_ms,total_pipeline_latency_ms") {
+            if let Err(e) = writeln!(writer, "frame_index,total_pipeline_latency_ms") {
                 error!("Failed to write latency log header: {e}");
                 return;
             }
 
             *connection_context.latency_log_file.lock() = Some(writer);
 
-            info!("Started motion-to-photon latency logging to: {}", path.display());
+            info!("Started latency logging to: {}", path.display());
         }
         Err(e) => {
             error!("Failed to create latency log file: {e}");

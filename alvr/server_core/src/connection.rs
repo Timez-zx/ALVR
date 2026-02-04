@@ -1076,6 +1076,8 @@ fn connection_pipeline(
                     // Create latency log file if logging is enabled but file doesn't exist
                     if should_log && ctx.latency_log_file.lock().is_none() {
                         crate::create_latency_log_file(&ctx);
+                        // Reset frame counter when starting new log
+                        stats.reset_latency_log_frame_counter();
                     }
 
                     let (network_latency, game_latency) =

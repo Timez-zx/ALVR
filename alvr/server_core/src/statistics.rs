@@ -60,6 +60,7 @@ pub struct StatisticsManager {
     last_vsync_time: Instant,
     frame_interval: Duration,
     last_throughput_directives: BitrateDirectives,
+    latency_log_frame_counter: u64,
 }
 
 impl StatisticsManager {
@@ -92,6 +93,7 @@ impl StatisticsManager {
             last_vsync_time: Instant::now(),
             frame_interval: nominal_server_frame_interval,
             last_throughput_directives: BitrateDirectives::default(),
+            latency_log_frame_counter: 0,
         }
     }
 
@@ -286,17 +288,13 @@ impl StatisticsManager {
             if should_log {
                 let mut log_file_guard = latency_log_file.lock();
                 if let Some(writer) = log_file_guard.as_mut() {
-                    let timestamp_ms = SystemTime::now()
-                        .duration_since(SystemTime::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_millis();
-
                     let _ = writeln!(
                         writer,
                         "{},{:.3}",
-                        timestamp_ms,
+                        self.latency_log_frame_counter,
                         client_stats.total_pipeline_latency.as_secs_f64() * 1000.0,
                     );
+                    self.latency_log_frame_counter += 1;
                 }
             } else {
                 // If logging is disabled but file is open, close it
@@ -352,5 +350,9 @@ impl StatisticsManager {
         }
 
         (self.last_vsync_time + self.frame_interval).saturating_duration_since(now)
+    }
+
+    pub fn reset_latency_log_frame_counter(&mut self) {
+        self.latency_log_frame_counter = 0;
     }
 }
