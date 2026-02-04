@@ -1504,6 +1504,10 @@ pub struct LoggingConfig {
     #[schema(flag = "real-time")]
     pub log_haptics: bool,
 
+    #[schema(flag = "real-time")]
+    #[schema(strings(help = "Record motion-to-photon latency data to CSV file for analysis."))]
+    pub log: bool,
+
     #[cfg_attr(not(debug_assertions), schema(flag = "hidden"))]
     #[schema(strings(help = "These settings enable extra spammy logs for debugging purposes."))]
     pub debug_groups: DebugGroupsConfig,
@@ -2147,6 +2151,7 @@ pub fn session_settings_default() -> SettingsDefault {
                 log_button_presses: false,
                 log_tracking: false,
                 log_haptics: false,
+                log: false,
                 notification_level: LogSeverityDefault {
                     variant: if cfg!(debug_assertions) {
                         LogSeverityDefaultVariant::Info

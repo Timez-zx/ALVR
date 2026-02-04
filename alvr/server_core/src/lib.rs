@@ -16,7 +16,7 @@ pub use tracking::HandType;
 
 use crate::connection::VideoPacket;
 use alvr_common::{
-    dbg_server_core, error,
+    dbg_server_core, error, info,
     glam::Vec2,
     once_cell::sync::Lazy,
     parking_lot::{Mutex, RwLock},
@@ -40,7 +40,7 @@ use std::{
     env,
     ffi::OsStr,
     fs::File,
-    io::Write,
+    io::{BufWriter, Write},
     sync::{
         atomic::{AtomicBool, Ordering},
         mpsc::{self, SyncSender, TrySendError},
@@ -107,6 +107,7 @@ pub struct ConnectionContext {
     decoder_config: Mutex<Option<DecoderInitializationConfig>>,
     video_mirror_sender: Mutex<Option<broadcast::Sender<Vec<u8>>>>,
     video_recording_file: Mutex<Option<File>>,
+    latency_log_file: Mutex<Option<BufWriter<File>>>,
     connection_threads: Mutex<Vec<JoinHandle<()>>>,
     clients_to_be_removed: Mutex<HashSet<String>>,
     video_channel_sender: Mutex<Option<SyncSender<VideoPacket>>>,
@@ -141,6 +142,32 @@ pub fn create_recording_file(connection_context: &ConnectionContext, settings: &
         }
         Err(e) => {
             error!("Failed to record video on disk: {e}");
+        }
+    }
+}
+
+pub fn create_latency_log_file(connection_context: &ConnectionContext) {
+    let path = FILESYSTEM_LAYOUT.get().unwrap().log_dir.join(format!(
+        "motion_to_photon_{}.csv",
+        chrono::Local::now().format("%F.%H-%M-%S")
+    ));
+
+    match File::create(&path) {
+        Ok(file) => {
+            let mut writer = BufWriter::new(file);
+
+            // Write CSV header
+            if let Err(e) = writeln!(writer, "timestamp_ms,total_pipeline_latency_ms") {
+                error!("Failed to write latency log header: {e}");
+                return;
+            }
+
+            *connection_context.latency_log_file.lock() = Some(writer);
+
+            info!("Started motion-to-photon latency logging to: {}", path.display());
+        }
+        Err(e) => {
+            error!("Failed to create latency log file: {e}");
         }
     }
 }
@@ -218,6 +245,7 @@ impl ServerCoreContext {
             decoder_config: Mutex::new(None),
             video_mirror_sender: Mutex::new(None),
             video_recording_file: Mutex::new(None),
+            latency_log_file: Mutex::new(None),
             connection_threads: Mutex::new(Vec::new()),
             clients_to_be_removed: Mutex::new(HashSet::new()),
             video_channel_sender: Mutex::new(None),

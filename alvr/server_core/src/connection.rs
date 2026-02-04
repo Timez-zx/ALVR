@@ -33,6 +33,7 @@ use alvr_sockets::{
 };
 use std::{
     collections::HashMap,
+    io::Write,
     net::{IpAddr, Ipv4Addr},
     process::Command,
     sync::{mpsc::RecvTimeoutError, Arc},
@@ -833,6 +834,11 @@ fn connection_pipeline(
         },
     ));
 
+    // Create latency log file if enabled
+    if initial_settings.extra.logging.log {
+        crate::create_latency_log_file(&ctx);
+    }
+
     *ctx.bitrate_manager.lock() =
         BitrateManager::new(initial_settings.video.bitrate.history_size, fps);
 
@@ -1063,13 +1069,21 @@ fn connection_pipeline(
                 if let Some(stats) = &mut *ctx.statistics_manager.write() {
                     let timestamp = client_stats.target_timestamp;
                     let decoder_latency = client_stats.video_decode;
-                    let (network_latency, game_latency) = stats.report_statistics(client_stats);
+
+                    let session_manager_lock = SESSION_MANAGER.read();
+                    let should_log = session_manager_lock.settings().extra.logging.log;
+
+                    // Create latency log file if logging is enabled but file doesn't exist
+                    if should_log && ctx.latency_log_file.lock().is_none() {
+                        crate::create_latency_log_file(&ctx);
+                    }
+
+                    let (network_latency, game_latency) =
+                        stats.report_statistics(client_stats, &ctx.latency_log_file, should_log);
 
                     ctx.events_sender
                         .send(ServerCoreEvent::GameRenderLatencyFeedback(game_latency))
                         .ok();
-
-                    let session_manager_lock = SESSION_MANAGER.read();
                     ctx.bitrate_manager.lock().report_frame_latencies(
                         &session_manager_lock.settings().video.bitrate.mode,
                         timestamp,
@@ -1427,6 +1441,11 @@ fn connection_pipeline(
     *ctx.haptics_sender.lock() = None;
 
     *ctx.video_recording_file.lock() = None;
+
+    // Flush and close latency log file
+    if let Some(mut writer) = ctx.latency_log_file.lock().take() {
+        writer.flush().ok();
+    }
 
     session_manager_lock.update_client_list(
         client_hostname,

@@ -54,6 +54,7 @@ dist
 .vscode/
 .DS_Store
 .ccls-cache
+.claude
 
 # dependencies installed by xtask
 deps

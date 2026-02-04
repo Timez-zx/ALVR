@@ -1,9 +1,11 @@
-use alvr_common::{SlidingWindowAverage, HEAD_ID};
+use alvr_common::{parking_lot::Mutex, SlidingWindowAverage, HEAD_ID};
 use alvr_events::{BitrateDirectives, EventType, GraphStatistics, StatisticsSummary};
 use alvr_packets::ClientStatistics;
 use std::{
     collections::{HashMap, VecDeque},
-    time::{Duration, Instant},
+    fs::File,
+    io::{BufWriter, Write},
+    time::{Duration, Instant, SystemTime},
 };
 
 const FULL_REPORT_INTERVAL: Duration = Duration::from_millis(500);
@@ -183,7 +185,12 @@ impl StatisticsManager {
 
     // Called every frame. Some statistics are reported once every frame
     // Returns (network latency, game time latency)
-    pub fn report_statistics(&mut self, client_stats: ClientStatistics) -> (Duration, Duration) {
+    pub fn report_statistics(
+        &mut self,
+        client_stats: ClientStatistics,
+        latency_log_file: &Mutex<Option<BufWriter<File>>>,
+        should_log: bool,
+    ) -> (Duration, Duration) {
         self.motion_to_photon_latency_average
             .submit_sample(client_stats.total_pipeline_latency);
 
@@ -274,6 +281,32 @@ impl StatisticsManager {
                 packet_bits / Duration::max(network_latency, EPS_INTERVAL).as_secs_f32();
             let bitrate_bps = packet_bits
                 / Duration::max(self.last_frame_present_interval, EPS_INTERVAL).as_secs_f32();
+
+            // Write to CSV if logging enabled
+            if should_log {
+                let mut log_file_guard = latency_log_file.lock();
+                if let Some(writer) = log_file_guard.as_mut() {
+                    let timestamp_ms = SystemTime::now()
+                        .duration_since(SystemTime::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis();
+
+                    let _ = writeln!(
+                        writer,
+                        "{},{:.3}",
+                        timestamp_ms,
+                        client_stats.total_pipeline_latency.as_secs_f64() * 1000.0,
+                    );
+                }
+            } else {
+                // If logging is disabled but file is open, close it
+                let mut log_file_guard = latency_log_file.lock();
+                if log_file_guard.is_some() {
+                    if let Some(mut writer) = log_file_guard.take() {
+                        let _ = writer.flush();
+                    }
+                }
+            }
 
             // todo: use target timestamp in nanoseconds. the dashboard needs to use the first
             // timestamp as the graph time origin.
