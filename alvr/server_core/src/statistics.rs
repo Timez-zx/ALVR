@@ -288,11 +288,17 @@ impl StatisticsManager {
             if should_log {
                 let mut log_file_guard = latency_log_file.lock();
                 if let Some(writer) = log_file_guard.as_mut() {
+                    let client_alvr_total = client_stats.rendering
+                        + client_stats.video_decode
+                        + client_stats.video_decoder_queue;
+
                     let _ = writeln!(
                         writer,
-                        "{},{:.3}",
+                        "{},{:.3},{:.3},{:.3}",
                         self.latency_log_frame_counter,
                         client_stats.total_pipeline_latency.as_secs_f64() * 1000.0,
+                        network_latency.as_secs_f64() * 1000.0,
+                        client_alvr_total.as_secs_f64() * 1000.0,
                     );
                     self.latency_log_frame_counter += 1;
                 }

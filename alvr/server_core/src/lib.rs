@@ -157,7 +157,7 @@ pub fn create_latency_log_file(connection_context: &ConnectionContext) {
             let mut writer = BufWriter::new(file);
 
             // Write CSV header
-            if let Err(e) = writeln!(writer, "frame_index,total_pipeline_latency_ms") {
+            if let Err(e) = writeln!(writer, "frame_index,total_pipeline_latency_ms,network_latency_ms,client_alvr_total_ms") {
                 error!("Failed to write latency log header: {e}");
                 return;
             }
