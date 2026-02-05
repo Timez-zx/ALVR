@@ -187,8 +187,9 @@ fn decoder_attempt_setup(
     Ok(decoder)
 }
 
-// Since we leak the ImageReader, and we pass frame_result_callback to it which contains a reference
-// to ClientCoreContext, to avoid circular references we need to use a Weak reference.
+// The image listener captures frame_result_callback which contains a reference to
+// ClientCoreContext. We use a Weak reference to avoid circular references so that the
+// ImageReader can be safely dropped without preventing ClientCoreContext cleanup.
 fn decoder_lifecycle(
     config: VideoDecoderConfig,
     csd_0: Vec<u8>,
@@ -241,7 +242,6 @@ fn decoder_lifecycle(
     }))?;
 
     // Documentation says that this call is necessary to properly dispose acquired buffers.
-    // todo: find out how to use it and avoid leaking the ImageReader
     image_reader.set_buffer_removed_listener(Box::new(|_, _| ()))?;
 
     let mime = mime_for_codec(config.codec);
@@ -396,8 +396,17 @@ pub fn video_decoder_split(
             }
 
             image_queue.lock().clear();
-            error!("FIXME: Leaking Imagereader!");
-            Box::leak(Box::new(image_reader));
+
+            // Replace listeners with no-ops before dropping, to prevent any late native
+            // callbacks from accessing stale captured state (image_queue / frame_result_callback).
+            image_reader.set_image_listener(Box::new(|_| ())).ok();
+            image_reader
+                .set_buffer_removed_listener(Box::new(|_, _| ()))
+                .ok();
+            // Now safe to drop: all acquired images have been released (queue cleared above),
+            // and listeners have been neutralized.  AImageReader_delete will free the native
+            // AImageReader and its associated hardware buffers.
+            drop(image_reader);
         }
     });
 
