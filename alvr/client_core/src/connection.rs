@@ -327,7 +327,7 @@ fn connection_pipeline(
                 };
 
                 if let Some(stats) = &mut *ctx.statistics_manager.lock() {
-                    stats.report_video_packet_received(header.timestamp);
+                    stats.report_video_packet_received(header.timestamp, header.is_idr);
                 }
 
                 if header.is_idr {
