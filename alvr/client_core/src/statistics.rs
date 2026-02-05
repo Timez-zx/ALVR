@@ -61,7 +61,7 @@ impl StatisticsManager {
         }
     }
 
-    pub fn report_video_packet_received(&mut self, target_timestamp: Duration, is_idr: bool) {
+    pub fn report_video_packet_received(&mut self, target_timestamp: Duration, is_idr: bool, packet_index: u32) {
         if let Some(frame) = self
             .history_buffer
             .iter_mut()
@@ -69,6 +69,7 @@ impl StatisticsManager {
         {
             frame.video_packet_received = Instant::now();
             frame.client_stats.is_idr = is_idr;
+            frame.client_stats.packet_index = packet_index;
         }
     }
 

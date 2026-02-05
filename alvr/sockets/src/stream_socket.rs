@@ -168,12 +168,17 @@ pub struct ReceiverData<H> {
     size: usize, // counting the prefix
     used_buffer_queue: mpsc::Sender<Vec<u8>>,
     had_packet_loss: bool,
+    packet_index: u32,
     _phantom: PhantomData<H>,
 }
 
 impl<H> ReceiverData<H> {
     pub fn had_packet_loss(&self) -> bool {
         self.had_packet_loss
+    }
+
+    pub fn packet_index(&self) -> u32 {
+        self.packet_index
     }
 }
 
@@ -256,6 +261,7 @@ impl<H: DeserializeOwned + Serialize> StreamReceiver<H> {
             size: packet.size,
             used_buffer_queue: self.used_buffer_queue.clone(),
             had_packet_loss,
+            packet_index: packet.index,
             _phantom: PhantomData,
         })
     }

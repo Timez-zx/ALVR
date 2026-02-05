@@ -366,6 +366,7 @@ pub struct ClientStatistics {
     pub vsync_queue: Duration,
     pub total_pipeline_latency: Duration,
     pub is_idr: bool, // whether this frame is an IDR frame
+    pub packet_index: u32, // packet index of this frame
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
