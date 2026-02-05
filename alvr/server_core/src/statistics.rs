@@ -291,15 +291,19 @@ impl StatisticsManager {
             if should_log {
                 let mut log_file_guard = latency_log_file.lock();
                 if let Some(writer) = log_file_guard.as_mut() {
+                    let compositor_time = server_compositor_latency + client_stats.rendering;
                     let _ = writeln!(
                         writer,
-                        "{},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{},{}",
+                        "{},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{},{}",
                         self.latency_log_frame_counter,
                         client_stats.total_pipeline_latency.as_secs_f64() * 1000.0,
                         network_latency.as_secs_f64() * 1000.0,
                         client_stats.video_decode.as_secs_f64() * 1000.0,
                         client_stats.video_decoder_queue.as_secs_f64() * 1000.0,
                         client_stats.vsync_queue.as_secs_f64() * 1000.0,
+                        compositor_time.as_secs_f64() * 1000.0,
+                        game_time_latency.as_secs_f64() * 1000.0,
+                        encoder_latency.as_secs_f64() * 1000.0,
                         client_stats.frame_interval.as_secs_f64() * 1000.0,
                         client_stats.packet_index,
                         if frame.is_idr { 1 } else { 0 },
