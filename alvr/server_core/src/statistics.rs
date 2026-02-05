@@ -19,6 +19,7 @@ pub struct HistoryFrame {
     frame_encoded: Instant,
     video_packet_bytes: usize,
     total_pipeline_latency: Duration,
+    is_idr: bool,
 }
 
 impl Default for HistoryFrame {
@@ -32,6 +33,7 @@ impl Default for HistoryFrame {
             frame_encoded: now,
             video_packet_bytes: 0,
             total_pipeline_latency: Duration::ZERO,
+            is_idr: false,
         }
     }
 }
@@ -202,6 +204,7 @@ impl StatisticsManager {
             .find(|frame| frame.target_timestamp == client_stats.target_timestamp)
         {
             frame.total_pipeline_latency = client_stats.total_pipeline_latency;
+            frame.is_idr = client_stats.is_idr;
 
             let game_time_latency = frame
                 .frame_present
@@ -294,12 +297,13 @@ impl StatisticsManager {
 
                     let _ = writeln!(
                         writer,
-                        "{},{:.3},{:.3},{:.3},{:.3}",
+                        "{},{:.3},{:.3},{:.3},{:.3},{}",
                         self.latency_log_frame_counter,
                         client_stats.total_pipeline_latency.as_secs_f64() * 1000.0,
                         network_latency.as_secs_f64() * 1000.0,
                         client_alvr_total.as_secs_f64() * 1000.0,
                         client_stats.frame_interval.as_secs_f64() * 1000.0,
+                        frame.is_idr,
                     );
                     self.latency_log_frame_counter += 1;
                 }
