@@ -381,6 +381,14 @@ pub enum FirewallRulesAction {
     Remove,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct LatencyTestConfig {
+    pub client_ip: String,
+    pub frame_size_kb: u32,
+    pub frame_rate_hz: u32,
+    pub duration_secs: u32,
+}
+
 #[derive(Serialize, Deserialize, Debug)]
 pub enum ServerRequest {
     Log(LogEntry),
@@ -401,6 +409,8 @@ pub enum ServerRequest {
     GetDriverList,
     RestartSteamvr,
     ShutdownSteamvr,
+    StartLatencyTest(LatencyTestConfig),
+    StopLatencyTest,
 }
 
 // Note: server sends a packet to the client at low frequency, binary encoding, without ensuring

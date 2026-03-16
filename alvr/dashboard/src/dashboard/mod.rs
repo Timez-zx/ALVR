@@ -1,7 +1,8 @@
 mod components;
 
 use self::components::{
-    DevicesTab, LogsTab, NotificationBar, SettingsTab, SetupWizard, SetupWizardRequest,
+    DevicesTab, LogsTab, MeasurementTab, NotificationBar, SettingsTab, SetupWizard,
+    SetupWizardRequest,
 };
 use crate::{
     dashboard::components::{CloseAction, NewVersionPopup, StatisticsTab},
@@ -24,6 +25,7 @@ enum Tab {
     Installation,
     Logs,
     Debug,
+    Measurement,
     About,
 }
 
@@ -40,6 +42,7 @@ pub struct Dashboard {
     #[cfg(not(target_arch = "wasm32"))]
     installation_tab: components::InstallationTab,
     logs_tab: LogsTab,
+    measurement_tab: MeasurementTab,
     notification_bar: NotificationBar,
     setup_wizard: SetupWizard,
     new_version_popup: Option<components::NewVersionPopup>,
@@ -67,6 +70,7 @@ impl Dashboard {
                 (Tab::Installation, "💾  Installation"),
                 (Tab::Logs, "📝  Logs"),
                 (Tab::Debug, "🐞  Debug"),
+                (Tab::Measurement, "📊  Measurement"),
                 (Tab::About, "ℹ  About"),
             ]
             .into_iter()
@@ -77,6 +81,7 @@ impl Dashboard {
             #[cfg(not(target_arch = "wasm32"))]
             installation_tab: components::InstallationTab::new(),
             logs_tab: LogsTab::new(),
+            measurement_tab: MeasurementTab::new(),
             notification_bar: NotificationBar::new(),
             setup_wizard: SetupWizard::new(),
             setup_wizard_open: false,
@@ -136,6 +141,7 @@ impl eframe::App for Dashboard {
                     let settings = session.to_settings();
 
                     self.connections_tab.update_client_list(&session);
+                    self.measurement_tab.update_client_list(&session);
                     self.settings_tab.update_session(&session.session_settings);
                     self.logs_tab.update_settings(&settings);
                     self.notification_bar.update_settings(&settings);
@@ -295,6 +301,11 @@ impl eframe::App for Dashboard {
                             Tab::Logs => self.logs_tab.ui(ui),
                             Tab::Debug => {
                                 if let Some(request) = components::debug_tab_ui(ui) {
+                                    requests.push(request);
+                                }
+                            }
+                            Tab::Measurement => {
+                                if let Some(request) = self.measurement_tab.ui(ui) {
                                     requests.push(request);
                                 }
                             }

@@ -289,6 +289,20 @@ async fn http_api(
                             .send(ServerCoreEvent::ShutdownPending)
                             .ok();
                     }
+                    ServerRequest::StartLatencyTest(config) => {
+                        info!(
+                            "Starting latency test: client={}, frame_size={}KB, rate={}Hz, duration={}s",
+                            config.client_ip,
+                            config.frame_size_kb,
+                            config.frame_rate_hz,
+                            config.duration_secs
+                        );
+                        // TODO: Implement latency test start
+                    }
+                    ServerRequest::StopLatencyTest => {
+                        info!("Stopping latency test");
+                        // TODO: Implement latency test stop
+                    }
                 }
 
                 reply(StatusCode::OK)?

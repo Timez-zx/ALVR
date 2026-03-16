@@ -292,6 +292,10 @@ impl DataSources {
                                 ServerRequest::RestartSteamvr | ServerRequest::ShutdownSteamvr => {
                                     warn!("Streamer not launched, can't signal SteamVR shutdown")
                                 }
+                                ServerRequest::StartLatencyTest(_)
+                                | ServerRequest::StopLatencyTest => {
+                                    warn!("Cannot perform latency test, streamer is not connected.")
+                                }
                             }
                         } else {
                             // todo: this should be changed to a GET request, requires removing body
