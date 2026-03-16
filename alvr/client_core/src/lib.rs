@@ -7,6 +7,7 @@
 
 mod c_api;
 mod connection;
+mod latency_test;
 mod logging_backend;
 mod sockets;
 mod statistics;
@@ -18,7 +19,7 @@ mod audio;
 pub mod video_decoder;
 
 use alvr_common::{
-    dbg_client_core, error,
+    dbg_client_core, error, info,
     glam::{Quat, UVec2, Vec2, Vec3},
     parking_lot::{Mutex, RwLock},
     warn, ConnectionState, DeviceMotion, Fov, LifecycleState, Pose, ViewParams, HAND_LEFT_ID,
@@ -113,6 +114,14 @@ impl ClientCoreContext {
                 )
             }
         });
+
+        // Start latency test listener
+        info!("ClientCoreContext::new - About to start latency test listener");
+        if let Err(e) = latency_test::LATENCY_TEST_CLIENT.lock().start_listener() {
+            error!("Failed to start latency test listener: {}", e);
+        } else {
+            info!("Latency test listener started successfully");
+        }
 
         Self {
             lifecycle_state,

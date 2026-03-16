@@ -221,6 +221,7 @@ dependencies = [
  "alvr_system_info",
  "android_logger",
  "app_dirs2",
+ "bincode",
  "env_logger",
  "mdns-sd",
  "ndk 0.9.0",

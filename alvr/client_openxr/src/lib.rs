@@ -136,6 +136,8 @@ fn create_session(
 pub fn entry_point() {
     alvr_client_core::init_logging();
 
+    info!("=== ALVR CLIENT BUILD WITH LATENCY TEST SUPPORT ===");
+
     let platform = alvr_system_info::platform();
 
     let loader_suffix = match platform {

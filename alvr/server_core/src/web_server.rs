@@ -297,11 +297,13 @@ async fn http_api(
                             config.frame_rate_hz,
                             config.duration_secs
                         );
-                        // TODO: Implement latency test start
+                        if let Err(e) = crate::latency_test::LATENCY_TEST_SERVER.lock().start(config) {
+                            error!("Failed to start latency test: {}", e);
+                        }
                     }
                     ServerRequest::StopLatencyTest => {
                         info!("Stopping latency test");
-                        // TODO: Implement latency test stop
+                        crate::latency_test::LATENCY_TEST_SERVER.lock().stop();
                     }
                 }
 

@@ -4,6 +4,7 @@ mod connection;
 mod hand_gestures;
 mod haptics;
 mod input_mapping;
+mod latency_test;
 mod logging_backend;
 mod sockets;
 mod statistics;

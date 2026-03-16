@@ -381,12 +381,25 @@ pub enum FirewallRulesAction {
     Remove,
 }
 
+pub const LATENCY_TEST_PORT: u16 = 61698;
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct LatencyTestConfig {
     pub client_ip: String,
     pub frame_size_kb: u32,
     pub frame_rate_hz: u32,
     pub duration_secs: u32,
+}
+
+/// Control messages for latency test (sent over TCP control plane)
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub enum LatencyTestControlMessage {
+    /// Server tells client to start the test with given config
+    StartTest(LatencyTestConfig),
+    /// Server tells client to stop the test
+    StopTest,
+    /// Client acknowledges the command
+    Ack,
 }
 
 #[derive(Serialize, Deserialize, Debug)]

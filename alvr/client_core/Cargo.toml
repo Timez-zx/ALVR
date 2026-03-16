@@ -23,6 +23,7 @@ alvr_sockets.workspace = true
 alvr_system_info.workspace = true
 
 app_dirs2 = "2"
+bincode = "1"
 mdns-sd = "0.13"
 rand = "0.9"
 serde = "1"
