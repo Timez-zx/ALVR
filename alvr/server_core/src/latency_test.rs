@@ -1,5 +1,6 @@
 use alvr_common::{anyhow::Result, info, warn, error, once_cell::sync::Lazy, parking_lot::Mutex};
 use alvr_packets::{LatencyTestConfig, LatencyTestControlMessage, LATENCY_TEST_PORT};
+use socket2::{Domain, Socket, Type};
 use std::{
     io::{Read, Write},
     net::{TcpStream, SocketAddr, IpAddr},
@@ -38,14 +39,19 @@ impl LatencyTestServer {
         }
 
         let client_ip: IpAddr = config.client_ip.parse()?;
-        let addr = SocketAddr::new(client_ip, LATENCY_TEST_PORT);
+        let remote_addr = SocketAddr::new(client_ip, LATENCY_TEST_PORT);
+        let local_addr: SocketAddr = format!("0.0.0.0:{}", LATENCY_TEST_PORT).parse()?;
 
-        info!("Connecting to client at {} for latency test", addr);
+        info!("Connecting from {} to {} for latency test", local_addr, remote_addr);
 
-        // Try to connect to client
-        let stream = TcpStream::connect_timeout(&addr, CONNECT_TIMEOUT)?;
-        stream.set_read_timeout(Some(READ_TIMEOUT))?;
-        stream.set_nodelay(true)?;
+        // Create socket, bind to local port, then connect
+        let socket = Socket::new(Domain::IPV4, Type::STREAM, None)?;
+        socket.set_reuse_address(true)?;
+        socket.bind(&local_addr.into())?;
+        socket.connect_timeout(&remote_addr.into(), CONNECT_TIMEOUT)?;
+        socket.set_read_timeout(Some(READ_TIMEOUT))?;
+        socket.set_nodelay(true)?;
+        let stream: TcpStream = socket.into();
 
         info!("Connected to client for latency test");
 
