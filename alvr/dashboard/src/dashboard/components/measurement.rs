@@ -110,7 +110,7 @@ impl MeasurementTab {
                 ui.label("Duration (seconds):");
                 let mut duration = self.duration_secs as f32;
                 if ui
-                    .add(eframe::egui::Slider::new(&mut duration, 5.0..=120.0))
+                    .add(eframe::egui::Slider::new(&mut duration, 5.0..=3600.0))
                     .changed()
                 {
                     self.duration_secs = duration as u32;
