@@ -455,15 +455,18 @@ fn run_latency_test(
     {
         if Instant::now() >= next_frame_time {
             let ts = start_time.elapsed().as_nanos() as u64;
+
+            // Register frame in recv thread BEFORE sending UDP, so the recv
+            // thread is ready to accept shards even if the server responds
+            // before the channel message is drained.
+            frame_tx.send((current_frame_index as u32, ts)).ok();
+
             let sensor_packet = LatencyTestSensorPacket {
                 frame_index: current_frame_index,
                 client_send_timestamp_ns: ts,
             };
             let sensor_data = bincode::serialize(&sensor_packet)?;
-
-            if udp_socket.send_to(&sensor_data, udp_remote_addr).is_ok() {
-                frame_tx.send((current_frame_index as u32, ts)).ok();
-            }
+            udp_socket.send_to(&sensor_data, udp_remote_addr).ok();
 
             current_frame_index += 1;
             next_frame_time += frame_interval;
