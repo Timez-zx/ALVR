@@ -382,6 +382,7 @@ pub enum FirewallRulesAction {
 }
 
 pub const LATENCY_TEST_PORT: u16 = 61698;
+pub const LATENCY_TEST_DATA_PORT: u16 = 61699;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct LatencyTestConfig {
@@ -389,6 +390,36 @@ pub struct LatencyTestConfig {
     pub frame_size_kb: u32,
     pub frame_rate_hz: u32,
     pub duration_secs: u32,
+}
+
+/// Sensor packet sent from client to server (UDP data plane)
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct LatencyTestSensorPacket {
+    pub frame_index: u64,
+    pub client_send_timestamp_ns: u64,
+}
+
+// Shard format constants (matching ALVR's stream_socket)
+pub const LATENCY_TEST_SHARD_PREFIX_SIZE: usize = 18; // 4 + 2 + 4 + 4 + 4
+pub const LATENCY_TEST_MAX_PACKET_SIZE: usize = 1400;
+pub const LATENCY_TEST_MAX_SHARD_DATA_SIZE: usize = LATENCY_TEST_MAX_PACKET_SIZE - LATENCY_TEST_SHARD_PREFIX_SIZE;
+pub const LATENCY_TEST_STREAM_ID: u16 = 100; // dedicated stream ID for latency test
+
+/// Header embedded in the first shard's data section
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct LatencyTestFrameHeader {
+    pub client_send_timestamp_ns: u64,
+    pub server_recv_timestamp_ns: u64,
+    pub server_send_timestamp_ns: u64,
+}
+
+/// Per-frame latency report from client to server (TCP control plane)
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct LatencyTestFrameReport {
+    pub frame_index: u64,
+    pub shards_sent: u32,    // number of shards sent for this frame
+    pub shards_received: u32, // number of shards received for this frame
+    pub rtt_us: u64, // round-trip time in microseconds
 }
 
 /// Control messages for latency test (sent over TCP control plane)
@@ -400,6 +431,10 @@ pub enum LatencyTestControlMessage {
     StopTest,
     /// Client acknowledges the command
     Ack,
+    /// Client reports per-frame statistics
+    FrameReport(LatencyTestFrameReport),
+    /// Test completed
+    TestComplete,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
