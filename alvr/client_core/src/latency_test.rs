@@ -219,21 +219,22 @@ fn udp_receive_loop(
     let mut recv_buf = vec![0u8; 65535];
 
     while recv_running.load(Ordering::Relaxed) {
-        // Register new frames sent by the main thread (non-blocking drain)
-        while let Ok((frame_index, client_send_ts)) = frame_rx.try_recv() {
-            in_progress_frames.insert(
-                frame_index,
-                InProgressFrame {
-                    shards_count: 0,
-                    received_shards: HashSet::new(),
-                    client_send_timestamp_ns: client_send_ts,
-                },
-            );
-        }
-
         match socket.recv_from(&mut recv_buf) {
             Ok((size, _source_addr)) => {
                 let recv_time = start_time.elapsed().as_nanos() as u64;
+
+                // Drain frame registrations right before lookup so frames
+                // registered while we were blocked in recv_from are visible.
+                while let Ok((frame_index, client_send_ts)) = frame_rx.try_recv() {
+                    in_progress_frames.insert(
+                        frame_index,
+                        InProgressFrame {
+                            shards_count: 0,
+                            received_shards: HashSet::new(),
+                            client_send_timestamp_ns: client_send_ts,
+                        },
+                    );
+                }
 
                 let Some((stream_id, packet_idx, shards_count, shard_idx)) =
                     parse_shard_prefix(&recv_buf[..size])
