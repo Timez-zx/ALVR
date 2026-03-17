@@ -300,6 +300,56 @@ fn udp_receive_loop(
     }
 }
 
+/// Dedicated TCP thread — sends frame reports to server and checks for stop command.
+/// Keeps all TCP I/O off the main (UDP sensor) thread so sensor timing is never
+/// affected by TCP write stalls or Nagle delays.
+fn tcp_report_loop(
+    mut stream: TcpStream,
+    report_rx: mpsc::Receiver<LatencyTestFrameReport>,
+    stop_flag: Arc<AtomicBool>,
+    report_running: Arc<AtomicBool>,
+) {
+    let mut total_frames_reported: u64 = 0;
+    let mut last_stop_check = Instant::now();
+    let stop_check_interval = Duration::from_millis(200);
+
+    while report_running.load(Ordering::Relaxed) {
+        while let Ok(report) = report_rx.try_recv() {
+            if send_message(&mut stream, &LatencyTestControlMessage::FrameReport(report)).is_err() {
+                return;
+            }
+            total_frames_reported += 1;
+        }
+
+        if last_stop_check.elapsed() >= stop_check_interval {
+            stream.set_nonblocking(true).ok();
+            if let Ok(msg) = recv_message(&mut stream) {
+                if matches!(msg, LatencyTestControlMessage::StopTest) {
+                    info!("Received stop command");
+                    stop_flag.store(true, Ordering::Relaxed);
+                }
+            }
+            stream.set_nonblocking(false).ok();
+            last_stop_check = Instant::now();
+        }
+
+        thread::sleep(Duration::from_millis(1));
+    }
+
+    // Drain remaining reports after recv thread has flushed
+    while let Ok(report) = report_rx.try_recv() {
+        send_message(&mut stream, &LatencyTestControlMessage::FrameReport(report)).ok();
+        total_frames_reported += 1;
+    }
+
+    send_message(&mut stream, &LatencyTestControlMessage::TestComplete).ok();
+
+    info!(
+        "TCP report thread done: {} frames reported",
+        total_frames_reported
+    );
+}
+
 fn run_latency_test(
     stream: &mut TcpStream,
     config: LatencyTestConfig,
@@ -370,8 +420,6 @@ fn run_latency_test(
     info!("Using server UDP address: {}", udp_remote_addr);
 
     // ── Spawn dedicated UDP receive thread ─────────────────────────────
-    // Mirrors ALVR's stream_receive_thread: tight recv loop with zero TCP
-    // overhead so the kernel UDP buffer never overflows under shard bursts.
     let (frame_tx, frame_rx) = mpsc::channel::<(u32, u64)>();
     let (report_tx, report_rx) = mpsc::channel::<LatencyTestFrameReport>();
 
@@ -384,18 +432,27 @@ fn run_latency_test(
         udp_receive_loop(recv_socket, start_time, frame_rx, report_tx, recv_running_clone);
     });
 
-    // ── Main loop: send sensor packets + relay reports over TCP ────────
+    // ── Spawn dedicated TCP report thread ───────────────────────────────
+    let report_stream = stream.try_clone()?;
+    let report_running = Arc::new(AtomicBool::new(true));
+    let report_running_clone = Arc::clone(&report_running);
+    let stop_flag = Arc::new(AtomicBool::new(false));
+    let stop_flag_clone = Arc::clone(&stop_flag);
+
+    let report_thread = thread::spawn(move || {
+        tcp_report_loop(report_stream, report_rx, stop_flag_clone, report_running_clone);
+    });
+
+    // ── Main loop: ONLY sends UDP sensor packets ────────────────────────
     let test_start = Instant::now();
     let test_duration = Duration::from_secs(config.duration_secs as u64);
     let mut current_frame_index: u64 = 0;
     let mut next_frame_time = Instant::now();
-    let mut total_frames_reported: u64 = 0;
-    let mut last_tcp_check = Instant::now();
-    let tcp_check_interval = Duration::from_millis(200);
-    let mut should_stop = false;
 
-    while running.load(Ordering::Relaxed) && test_start.elapsed() < test_duration && !should_stop {
-        // Send sensor packet at frame rate
+    while running.load(Ordering::Relaxed)
+        && test_start.elapsed() < test_duration
+        && !stop_flag.load(Ordering::Relaxed)
+    {
         if Instant::now() >= next_frame_time {
             let ts = start_time.elapsed().as_nanos() as u64;
             let sensor_packet = LatencyTestSensorPacket {
@@ -412,44 +469,19 @@ fn run_latency_test(
             next_frame_time += frame_interval;
         }
 
-        // Relay completed reports from recv thread to server over TCP
-        while let Ok(report) = report_rx.try_recv() {
-            send_message(stream, &LatencyTestControlMessage::FrameReport(report))?;
-            total_frames_reported += 1;
-        }
-
-        // Low-frequency TCP stop check
-        if last_tcp_check.elapsed() >= tcp_check_interval {
-            stream.set_nonblocking(true)?;
-            if let Ok(msg) = recv_message(stream) {
-                if matches!(msg, LatencyTestControlMessage::StopTest) {
-                    info!("Received stop command");
-                    should_stop = true;
-                }
-            }
-            stream.set_nonblocking(false)?;
-            last_tcp_check = Instant::now();
-        }
-
         thread::sleep(Duration::from_millis(1));
     }
 
     // ── Shutdown ───────────────────────────────────────────────────────
+    // 1. Stop recv thread first — it flushes remaining frames to report_tx
     recv_running.store(false, Ordering::Relaxed);
     recv_thread.join().ok();
 
-    // Drain any remaining reports produced by the recv thread during shutdown
-    while let Ok(report) = report_rx.try_recv() {
-        send_message(stream, &LatencyTestControlMessage::FrameReport(report))?;
-        total_frames_reported += 1;
-    }
+    // 2. Stop report thread — it drains remaining reports and sends TestComplete
+    report_running.store(false, Ordering::Relaxed);
+    report_thread.join().ok();
 
-    send_message(stream, &LatencyTestControlMessage::TestComplete)?;
-
-    info!(
-        "Latency test completed: {} frames reported",
-        total_frames_reported
-    );
+    info!("Latency test completed");
 
     Ok(())
 }
