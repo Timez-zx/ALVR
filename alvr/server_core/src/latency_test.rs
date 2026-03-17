@@ -6,6 +6,7 @@ use alvr_packets::{
 };
 use socket2::{Domain, Socket, Type};
 use std::{
+    collections::HashMap,
     fs::File,
     io::{BufWriter, Read, Write},
     net::{IpAddr, SocketAddr, TcpStream, UdpSocket},
@@ -265,6 +266,12 @@ fn run_latency_test(
         LATENCY_TEST_MAX_PACKET_SIZE
     );
 
+    // Track which frame_indices the server actually sent shards for.
+    // Key = frame_index, Value = shards_count sent.
+    // Used to distinguish "client uplink lost" (frame absent) from
+    // "server downlink lost" (frame present but client received 0 shards).
+    let mut frames_sent: HashMap<u64, u32> = HashMap::new();
+
     let start_time = Instant::now();
     let mut recv_buf = vec![0u8; 65535];
     let mut shard_buf = Vec::with_capacity(LATENCY_TEST_MAX_PACKET_SIZE);
@@ -340,6 +347,9 @@ fn run_latency_test(
                             );
                         }
                     }
+
+                    // Record that the server sent shards for this frame.
+                    frames_sent.insert(sensor_packet.frame_index, shards_count);
                 }
             }
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -356,12 +366,19 @@ fn run_latency_test(
             while let Some(msg) = try_recv_message(&mut stream) {
                 match msg {
                     LatencyTestControlMessage::FrameReport(report) => {
+                        // Use server-side shards_sent: if the server never
+                        // received the sensor packet for this frame it records
+                        // 0 (uplink loss), otherwise it records the actual
+                        // shards_count it sent (downlink may still be lossy).
+                        let server_shards_sent = frames_sent
+                            .remove(&report.frame_index)
+                            .unwrap_or(0);
                         if let Some(ref mut writer) = csv_writer {
                             if let Err(e) = writeln!(
                                 writer,
                                 "{},{},{},{}",
                                 report.frame_index,
-                                report.shards_sent,
+                                server_shards_sent,
                                 report.shards_received,
                                 report.rtt_us
                             ) {
