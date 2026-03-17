@@ -1,4 +1,3 @@
-use crate::FILESYSTEM_LAYOUT;
 use alvr_common::{anyhow::Result, error, info, once_cell::sync::Lazy, parking_lot::Mutex, warn};
 use alvr_packets::{
     LatencyTestConfig, LatencyTestControlMessage, LatencyTestFrameHeader, LatencyTestSensorPacket,
@@ -123,13 +122,20 @@ fn try_recv_message(stream: &mut TcpStream) -> Option<LatencyTestControlMessage>
 }
 
 fn create_csv_file(config: &LatencyTestConfig) -> Result<BufWriter<File>> {
-    let log_dir = &FILESYSTEM_LAYOUT.get().unwrap().log_dir;
+    let project_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap();
+    let results_dir = project_root.join("results");
+    std::fs::create_dir_all(&results_dir)?;
+
     let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
     let filename = format!(
         "latency_test_{}Hz_{}KB_{}.csv",
         config.frame_rate_hz, config.frame_size_kb, timestamp
     );
-    let path = log_dir.join(&filename);
+    let path = results_dir.join(&filename);
 
     let file = File::create(&path)?;
     let mut writer = BufWriter::new(file);
