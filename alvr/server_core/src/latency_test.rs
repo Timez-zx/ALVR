@@ -92,7 +92,6 @@ fn send_message(stream: &mut TcpStream, msg: &LatencyTestControlMessage) -> Resu
     let data = bincode::serialize(msg)?;
     let len = data.len() as u32;
     stream.write_all(&len.to_be_bytes())?;
-    stream.flush()?;
     stream.write_all(&data)?;
     stream.flush()?;
     Ok(())
@@ -109,11 +108,18 @@ fn recv_message(stream: &mut TcpStream) -> Result<LatencyTestControlMessage> {
     Ok(bincode::deserialize(&data)?)
 }
 
+/// Non-destructive TCP check: peek first to confirm >= 4 bytes available,
+/// then read in blocking mode.  Avoids the partial-read corruption that
+/// `read_exact` on a nonblocking stream can cause.
 fn try_recv_message(stream: &mut TcpStream) -> Option<LatencyTestControlMessage> {
+    let mut peek_buf = [0u8; 4];
     stream.set_nonblocking(true).ok()?;
-    let result = recv_message(stream).ok();
+    let peeked = stream.peek(&mut peek_buf).unwrap_or(0);
     stream.set_nonblocking(false).ok();
-    result
+    if peeked < 4 {
+        return None;
+    }
+    recv_message(stream).ok()
 }
 
 fn create_csv_file(config: &LatencyTestConfig) -> Result<BufWriter<File>> {
@@ -259,6 +265,8 @@ fn run_latency_test(
     let mut warmup_buf = Vec::with_capacity(LATENCY_TEST_MAX_PACKET_SIZE);
     let mut last_warmup_send = Instant::now() - Duration::from_secs(1);
     let warmup_interval = Duration::from_millis(200);
+    let mut last_tcp_check = Instant::now();
+    let tcp_check_interval = Duration::from_millis(50);
 
     // Main test loop - receive sensor packets, send frame shards
     while running.load(Ordering::Relaxed) && start_time.elapsed() < test_duration {
@@ -336,26 +344,36 @@ fn run_latency_test(
             }
         }
 
-        // Check for frame reports from client via TCP
-        if let Some(msg) = try_recv_message(&mut stream) {
-            match msg {
-                LatencyTestControlMessage::FrameReport(report) => {
-                    // Write to CSV
-                    if let Some(ref mut writer) = csv_writer {
-                        if let Err(e) = writeln!(
-                            writer,
-                            "{},{},{},{}",
-                            report.frame_index, report.shards_sent, report.shards_received, report.rtt_us
-                        ) {
-                            error!("Failed to write to CSV: {}", e);
+        // Batch-drain frame reports from client via TCP (rate-limited)
+        if last_tcp_check.elapsed() >= tcp_check_interval {
+            let mut should_break = false;
+            while let Some(msg) = try_recv_message(&mut stream) {
+                match msg {
+                    LatencyTestControlMessage::FrameReport(report) => {
+                        if let Some(ref mut writer) = csv_writer {
+                            if let Err(e) = writeln!(
+                                writer,
+                                "{},{},{},{}",
+                                report.frame_index,
+                                report.shards_sent,
+                                report.shards_received,
+                                report.rtt_us
+                            ) {
+                                error!("Failed to write to CSV: {}", e);
+                            }
                         }
                     }
+                    LatencyTestControlMessage::TestComplete => {
+                        info!("Received test complete from client");
+                        should_break = true;
+                        break;
+                    }
+                    _ => {}
                 }
-                LatencyTestControlMessage::TestComplete => {
-                    info!("Received test complete from client");
-                    break;
-                }
-                _ => {}
+            }
+            last_tcp_check = Instant::now();
+            if should_break {
+                break;
             }
         }
     }
