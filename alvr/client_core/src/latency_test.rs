@@ -245,25 +245,6 @@ fn udp_receive_loop(
                     continue;
                 }
 
-                // Evict all older incomplete frames
-                let older: Vec<u32> = in_progress_frames
-                    .keys()
-                    .filter(|&&idx| idx < packet_idx)
-                    .copied()
-                    .collect();
-                for old_idx in older {
-                    if let Some(old) = in_progress_frames.remove(&old_idx) {
-                        report_tx
-                            .send(LatencyTestFrameReport {
-                                frame_index: old_idx as u64,
-                                shards_sent: old.shards_count.max(shards_count),
-                                shards_received: old.received_shards.len() as u32,
-                                rtt_us: 0,
-                            })
-                            .ok();
-                    }
-                }
-
                 if let Some(frame) = in_progress_frames.get_mut(&packet_idx) {
                     frame.shards_count = shards_count;
                     frame.received_shards.insert(shard_idx);
@@ -280,6 +261,27 @@ fn udp_receive_loop(
                             })
                             .ok();
                         in_progress_frames.remove(&packet_idx);
+
+                        // Evict older incomplete frames only after current
+                        // frame is fully complete (matches ALVR's strategy),
+                        // giving retransmitted shards time to arrive.
+                        let older: Vec<u32> = in_progress_frames
+                            .keys()
+                            .filter(|&&idx| idx < packet_idx)
+                            .copied()
+                            .collect();
+                        for old_idx in older {
+                            if let Some(old) = in_progress_frames.remove(&old_idx) {
+                                report_tx
+                                    .send(LatencyTestFrameReport {
+                                        frame_index: old_idx as u64,
+                                        shards_sent: old.shards_count.max(shards_count),
+                                        shards_received: old.received_shards.len() as u32,
+                                        rtt_us: 0,
+                                    })
+                                    .ok();
+                            }
+                        }
                     }
                 }
             }
