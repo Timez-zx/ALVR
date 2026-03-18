@@ -205,53 +205,103 @@ struct InProgressFrame {
     client_send_timestamp_ns: u64,
 }
 
-/// Dedicated UDP receive thread — mirrors ALVR's `stream_receive_thread`.
-/// Does nothing but recv from the socket, track shards, and push completed
-/// reports through the channel.  Zero TCP, zero blocking I/O.
-fn udp_receive_loop(
+/// Events routed through a single channel from both the recv thread and the
+/// main (send) thread into the process thread.  Keeping one channel avoids
+/// the awkward `try_recv` poll that the old design required inside the I/O loop.
+enum UdpEvent {
+    /// Parsed shard metadata; the payload bytes are not needed for latency tracking.
+    Shard {
+        packet_index: u32,
+        shards_count: u32,
+        shard_index: u32,
+        recv_time_ns: u64,
+    },
+    /// The main thread just sent frame `frame_index`; register it so the
+    /// process thread is ready before the first shard can arrive.
+    FrameReg {
+        frame_index: u32,
+        client_send_ts: u64,
+    },
+}
+
+/// Pure I/O thread — only calls `recv_from` and forwards raw bytes.
+/// No business logic lives here.
+fn udp_recv_thread(
     socket: UdpSocket,
     start_time: Instant,
-    frame_rx: mpsc::Receiver<(u32, u64)>,
-    report_tx: mpsc::Sender<LatencyTestFrameReport>,
+    event_tx: mpsc::Sender<UdpEvent>,
     recv_running: Arc<AtomicBool>,
 ) {
-    let mut in_progress_frames: HashMap<u32, InProgressFrame> = HashMap::new();
-    let mut recv_buf = vec![0u8; 65535];
+    // Only the prefix bytes matter; the payload is not used for latency tracking.
+    let mut recv_buf = vec![0u8; LATENCY_TEST_SHARD_PREFIX_SIZE];
 
     while recv_running.load(Ordering::Relaxed) {
-        match socket.recv_from(&mut recv_buf) {
-            Ok((size, _source_addr)) => {
-                let recv_time = start_time.elapsed().as_nanos() as u64;
-
-                // Drain frame registrations right before lookup so frames
-                // registered while we were blocked in recv_from are visible.
-                while let Ok((frame_index, client_send_ts)) = frame_rx.try_recv() {
-                    in_progress_frames.insert(
-                        frame_index,
-                        InProgressFrame {
-                            shards_count: 0,
-                            received_shards: HashSet::new(),
-                            client_send_timestamp_ns: client_send_ts,
-                        },
-                    );
-                }
-
-                let Some((stream_id, packet_idx, shards_count, shard_idx)) =
-                    parse_shard_prefix(&recv_buf[..size])
+        match socket.recv(&mut recv_buf) {
+            Ok(_) => {
+                let recv_time_ns = start_time.elapsed().as_nanos() as u64;
+                let Some((stream_id, packet_index, shards_count, shard_index)) =
+                    parse_shard_prefix(&recv_buf)
                 else {
                     continue;
                 };
                 if stream_id != LATENCY_TEST_STREAM_ID {
                     continue;
                 }
+                event_tx
+                    .send(UdpEvent::Shard {
+                        packet_index,
+                        shards_count,
+                        shard_index,
+                        recv_time_ns,
+                    })
+                    .ok();
+            }
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(_) => {}
+        }
+    }
+}
 
+/// Processing thread — receives `UdpEvent`s via a blocking channel, handles
+/// shard assembly and frame tracking, and forwards completed reports.
+/// Shuts down naturally when both senders (recv thread + main thread) are dropped.
+fn process_loop(
+    event_rx: mpsc::Receiver<UdpEvent>,
+    report_tx: mpsc::Sender<LatencyTestFrameReport>,
+) {
+    let mut in_progress_frames: HashMap<u32, InProgressFrame> = HashMap::new();
+
+    // Blocking recv drives the loop; exits when the channel is closed.
+    while let Ok(event) = event_rx.recv() {
+        match event {
+            UdpEvent::FrameReg {
+                frame_index,
+                client_send_ts,
+            } => {
+                in_progress_frames.insert(
+                    frame_index,
+                    InProgressFrame {
+                        shards_count: 0,
+                        received_shards: HashSet::new(),
+                        client_send_timestamp_ns: client_send_ts,
+                    },
+                );
+            }
+
+            UdpEvent::Shard {
+                packet_index,
+                shards_count,
+                shard_index,
+                recv_time_ns,
+            } => {
+                let (packet_idx, shard_idx) = (packet_index, shard_index);
                 if let Some(frame) = in_progress_frames.get_mut(&packet_idx) {
                     frame.shards_count = shards_count;
                     frame.received_shards.insert(shard_idx);
 
                     if frame.received_shards.len() as u32 == shards_count {
                         let rtt_us =
-                            recv_time.saturating_sub(frame.client_send_timestamp_ns) / 1000;
+                            recv_time_ns.saturating_sub(frame.client_send_timestamp_ns) / 1000;
                         report_tx
                             .send(LatencyTestFrameReport {
                                 frame_index: packet_idx as u64,
@@ -262,9 +312,8 @@ fn udp_receive_loop(
                             .ok();
                         in_progress_frames.remove(&packet_idx);
 
-                        // Evict older incomplete frames only after current
-                        // frame is fully complete (matches ALVR's strategy),
-                        // giving retransmitted shards time to arrive.
+                        // Evict older incomplete frames now that we know
+                        // shards_count from the completed frame.
                         let older: Vec<u32> = in_progress_frames
                             .keys()
                             .filter(|&&idx| idx < packet_idx)
@@ -285,12 +334,10 @@ fn udp_receive_loop(
                     }
                 }
             }
-            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
-            Err(_) => {}
         }
     }
 
-    // Flush remaining in-progress frames as incomplete
+    // Flush frames still in flight as incomplete.
     for (idx, frame) in in_progress_frames.drain() {
         report_tx
             .send(LatencyTestFrameReport {
@@ -303,43 +350,48 @@ fn udp_receive_loop(
     }
 }
 
-/// Dedicated TCP thread — sends frame reports to server and checks for stop command.
-/// Keeps all TCP I/O off the main (UDP sensor) thread so sensor timing is never
-/// affected by TCP write stalls or Nagle delays.
+/// TCP thread — drains completed reports and, every 200 ms, checks whether the
+/// server has sent a StopTest command.  Exits when `report_rx` is closed (i.e.
+/// the process thread has finished flushing).
 fn tcp_report_loop(
     mut stream: TcpStream,
     report_rx: mpsc::Receiver<LatencyTestFrameReport>,
     stop_flag: Arc<AtomicBool>,
-    report_running: Arc<AtomicBool>,
 ) {
     let mut total_frames_reported: u64 = 0;
-    let mut last_stop_check = Instant::now();
-    let stop_check_interval = Duration::from_millis(200);
 
-    while report_running.load(Ordering::Relaxed) {
-        while let Ok(report) = report_rx.try_recv() {
-            if send_message(&mut stream, &LatencyTestControlMessage::FrameReport(report)).is_err() {
-                return;
-            }
-            total_frames_reported += 1;
-        }
-
-        if last_stop_check.elapsed() >= stop_check_interval {
-            stream.set_nonblocking(true).ok();
-            if let Ok(msg) = recv_message(&mut stream) {
-                if matches!(msg, LatencyTestControlMessage::StopTest) {
-                    info!("Received stop command");
-                    stop_flag.store(true, Ordering::Relaxed);
+    loop {
+        match report_rx.recv_timeout(Duration::from_millis(200)) {
+            Ok(report) => {
+                if send_message(&mut stream, &LatencyTestControlMessage::FrameReport(report))
+                    .is_err()
+                {
+                    return;
+                }
+                total_frames_reported += 1;
+                // Batch-drain any additional reports that arrived in the meantime.
+                while let Ok(report) = report_rx.try_recv() {
+                    send_message(&mut stream, &LatencyTestControlMessage::FrameReport(report))
+                        .ok();
+                    total_frames_reported += 1;
                 }
             }
-            stream.set_nonblocking(false).ok();
-            last_stop_check = Instant::now();
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                // Opportunistically check for a stop command from the server.
+                stream.set_nonblocking(true).ok();
+                if let Ok(msg) = recv_message(&mut stream) {
+                    if matches!(msg, LatencyTestControlMessage::StopTest) {
+                        info!("Received stop command");
+                        stop_flag.store(true, Ordering::Relaxed);
+                    }
+                }
+                stream.set_nonblocking(false).ok();
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
-
-        thread::sleep(Duration::from_millis(1));
     }
 
-    // Drain remaining reports after recv thread has flushed
+    // Drain any reports that arrived between process thread flush and disconnect.
     while let Ok(report) = report_rx.try_recv() {
         send_message(&mut stream, &LatencyTestControlMessage::FrameReport(report)).ok();
         total_frames_reported += 1;
@@ -422,31 +474,35 @@ fn run_latency_test(
     };
     info!("Using server UDP address: {}", udp_remote_addr);
 
-    // ── Spawn dedicated UDP receive thread ─────────────────────────────
-    let (frame_tx, frame_rx) = mpsc::channel::<(u32, u64)>();
+    // ── Spawn threads ──────────────────────────────────────────────────
+    // event_tx is shared by the recv thread and the main (send) loop.
+    // Dropping both ends closes the channel and shuts down process_loop.
+    let (event_tx, event_rx) = mpsc::channel::<UdpEvent>();
     let (report_tx, report_rx) = mpsc::channel::<LatencyTestFrameReport>();
 
     let start_time = Instant::now();
-    let recv_socket = udp_socket.try_clone()?;
     let recv_running = Arc::new(AtomicBool::new(true));
     let recv_running_clone = Arc::clone(&recv_running);
+    let recv_socket = udp_socket.try_clone()?;
+    let recv_event_tx = event_tx.clone();
 
     let recv_thread = thread::spawn(move || {
-        udp_receive_loop(recv_socket, start_time, frame_rx, report_tx, recv_running_clone);
+        udp_recv_thread(recv_socket, start_time, recv_event_tx, recv_running_clone);
     });
 
-    // ── Spawn dedicated TCP report thread ───────────────────────────────
-    let report_stream = stream.try_clone()?;
-    let report_running = Arc::new(AtomicBool::new(true));
-    let report_running_clone = Arc::clone(&report_running);
+    let process_thread = thread::spawn(move || {
+        process_loop(event_rx, report_tx);
+    });
+
     let stop_flag = Arc::new(AtomicBool::new(false));
     let stop_flag_clone = Arc::clone(&stop_flag);
+    let report_stream = stream.try_clone()?;
 
     let report_thread = thread::spawn(move || {
-        tcp_report_loop(report_stream, report_rx, stop_flag_clone, report_running_clone);
+        tcp_report_loop(report_stream, report_rx, stop_flag_clone);
     });
 
-    // ── Main loop: ONLY sends UDP sensor packets ────────────────────────
+    // ── Main loop: send UDP sensor packets ────────────────────────────
     let test_start = Instant::now();
     let test_duration = Duration::from_secs(config.duration_secs as u64);
     let mut current_frame_index: u64 = 0;
@@ -459,10 +515,15 @@ fn run_latency_test(
         if Instant::now() >= next_frame_time {
             let ts = start_time.elapsed().as_nanos() as u64;
 
-            // Register frame in recv thread BEFORE sending UDP, so the recv
-            // thread is ready to accept shards even if the server responds
-            // before the channel message is drained.
-            frame_tx.send((current_frame_index as u32, ts)).ok();
+            // Register the frame with the process thread BEFORE sending UDP,
+            // so it is ready to accept shards even if the server responds
+            // before the event is drained.
+            event_tx
+                .send(UdpEvent::FrameReg {
+                    frame_index: current_frame_index as u32,
+                    client_send_ts: ts,
+                })
+                .ok();
 
             let sensor_packet = LatencyTestSensorPacket {
                 frame_index: current_frame_index,
@@ -478,13 +539,18 @@ fn run_latency_test(
         thread::sleep(Duration::from_millis(1));
     }
 
-    // ── Shutdown ───────────────────────────────────────────────────────
-    // 1. Stop recv thread first — it flushes remaining frames to report_tx
+    // ── Shutdown (channel-driven, no extra AtomicBools needed) ────────
+    // 1. Stop recv thread → its event_tx clone is dropped on exit.
     recv_running.store(false, Ordering::Relaxed);
     recv_thread.join().ok();
 
-    // 2. Stop report thread — it drains remaining reports and sends TestComplete
-    report_running.store(false, Ordering::Relaxed);
+    // 2. Drop main's event_tx clone → channel is now empty and closed
+    //    → process_loop exits its blocking recv() and flushes remaining frames.
+    drop(event_tx);
+    process_thread.join().ok();
+
+    // 3. report_tx was owned by process_thread and is now dropped → report_rx
+    //    disconnects → tcp_report_loop drains remaining reports and sends TestComplete.
     report_thread.join().ok();
 
     info!("Latency test completed");
