@@ -503,13 +503,12 @@ fn run_latency_test(
     });
 
     // ── Main loop: send UDP sensor packets ────────────────────────────
-    let test_start = Instant::now();
-    let test_duration = Duration::from_secs(config.duration_secs as u64);
+    let total_frames = config.frame_rate_hz as u64 * config.duration_secs as u64;
     let mut current_frame_index: u64 = 0;
     let mut next_frame_time = Instant::now();
 
     while running.load(Ordering::Relaxed)
-        && test_start.elapsed() < test_duration
+        && current_frame_index < total_frames
         && !stop_flag.load(Ordering::Relaxed)
     {
         if Instant::now() >= next_frame_time {
