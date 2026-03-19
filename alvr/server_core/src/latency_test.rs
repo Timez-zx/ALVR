@@ -1,15 +1,19 @@
-use alvr_common::{anyhow::Result, error, info, once_cell::sync::Lazy, parking_lot::Mutex, warn};
+use alvr_common::{
+    anyhow::Result, error, info, once_cell::sync::Lazy, parking_lot::Mutex, warn,
+    ConnectionError,
+};
 use alvr_packets::{
     LatencyTestConfig, LatencyTestControlMessage, LatencyTestFrameHeader, LatencyTestSensorPacket,
-    LATENCY_TEST_DATA_PORT, LATENCY_TEST_MAX_PACKET_SIZE, LATENCY_TEST_MAX_SHARD_DATA_SIZE,
-    LATENCY_TEST_PORT, LATENCY_TEST_SHARD_PREFIX_SIZE, LATENCY_TEST_STREAM_ID,
+    LATENCY_TEST_DATA_PORT, LATENCY_TEST_FRAME_STREAM_ID, LATENCY_TEST_MAX_PACKET_SIZE,
+    LATENCY_TEST_MAX_SHARD_DATA_SIZE, LATENCY_TEST_PORT, LATENCY_TEST_SENSOR_STREAM_ID,
 };
-use socket2::{Domain, Socket, Type};
+use alvr_session::{SocketBufferSize, SocketProtocol};
+use alvr_sockets::{StreamReceiver, StreamSender, StreamSocket, StreamSocketBuilder};
 use std::{
     collections::HashMap,
     fs::File,
     io::{BufWriter, Read, Write},
-    net::{IpAddr, SocketAddr, TcpStream, UdpSocket},
+    net::{IpAddr, SocketAddr, TcpStream},
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
@@ -20,7 +24,8 @@ use std::{
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const READ_TIMEOUT: Duration = Duration::from_secs(1);
-const UDP_RECV_TIMEOUT: Duration = Duration::from_millis(10);
+const DATA_RECV_TIMEOUT: Duration = Duration::from_millis(10);
+const MAX_UNREAD_FRAMES: usize = 256;
 
 /// Global latency test server instance
 pub static LATENCY_TEST_SERVER: Lazy<Mutex<LatencyTestServer>> =
@@ -50,7 +55,6 @@ impl LatencyTestServer {
 
         info!("Connecting to {} for latency test", remote_addr);
 
-        // Connect to client (don't bind local port - same as ALVR's tcp::connect_to_client)
         let stream = TcpStream::connect_timeout(&remote_addr, CONNECT_TIMEOUT)?;
         stream.set_read_timeout(Some(READ_TIMEOUT))?;
         stream.set_nodelay(true)?;
@@ -109,7 +113,7 @@ fn recv_message(stream: &mut TcpStream) -> Result<LatencyTestControlMessage> {
 }
 
 /// Non-destructive TCP check: peek first to confirm >= 4 bytes available,
-/// then read in blocking mode.  Avoids the partial-read corruption that
+/// then read in blocking mode. Avoids the partial-read corruption that
 /// `read_exact` on a nonblocking stream can cause.
 fn try_recv_message(stream: &mut TcpStream) -> Option<LatencyTestControlMessage> {
     let mut peek_buf = [0u8; 4];
@@ -141,7 +145,6 @@ fn create_csv_file(config: &LatencyTestConfig) -> Result<BufWriter<File>> {
     let file = File::create(&path)?;
     let mut writer = BufWriter::new(file);
 
-    // Write CSV header
     writeln!(writer, "frame_index,shards_sent,shards_received,rtt_us")?;
     writer.flush()?;
 
@@ -149,47 +152,40 @@ fn create_csv_file(config: &LatencyTestConfig) -> Result<BufWriter<File>> {
     Ok(writer)
 }
 
-/// Build shard with ALVR-compatible binary format
-/// Shard prefix (18 bytes, big-endian):
-/// - packet_length (4B): total shard length - 4
-/// - stream_id (2B)
-/// - packet_index (4B): frame index
-/// - shards_count (4B)
-/// - shard_index (4B)
-fn build_shard(
-    buffer: &mut Vec<u8>,
-    stream_id: u16,
-    frame_index: u64,
-    shard_index: u32,
-    shards_count: u32,
-    header: Option<&LatencyTestFrameHeader>,
-    data_size: usize,
+fn calculate_expected_shards_count(frame_size_kb: u32) -> Result<u32> {
+    let frame_size_bytes = frame_size_kb as usize * 1024;
+    let header_size = bincode::serialized_size(&LatencyTestFrameHeader {
+        frame_index: 0,
+        client_send_timestamp_ns: 0,
+        server_recv_timestamp_ns: 0,
+        server_send_timestamp_ns: 0,
+    })? as usize;
+
+    let first_shard_data = LATENCY_TEST_MAX_SHARD_DATA_SIZE - header_size;
+    Ok(if frame_size_bytes <= first_shard_data {
+        1
+    } else {
+        let remaining = frame_size_bytes - first_shard_data;
+        1 + ((remaining as f64) / (LATENCY_TEST_MAX_SHARD_DATA_SIZE as f64)).ceil() as u32
+    })
+}
+
+fn data_receive_loop(
+    mut stream_socket: StreamSocket,
+    recv_running: Arc<AtomicBool>,
+    running: Arc<AtomicBool>,
 ) {
-    // Calculate header size if present
-    let header_bytes = header.map(|h| bincode::serialize(h).unwrap_or_default());
-    let header_size = header_bytes.as_ref().map(|b| b.len()).unwrap_or(0);
-
-    // Total shard size = prefix + header + data
-    let shard_size = LATENCY_TEST_SHARD_PREFIX_SIZE + header_size + data_size;
-
-    buffer.clear();
-    buffer.resize(shard_size, 0);
-
-    // Write prefix (18 bytes)
-    let packet_length = (shard_size - 4) as u32;
-    buffer[0..4].copy_from_slice(&packet_length.to_be_bytes());
-    buffer[4..6].copy_from_slice(&stream_id.to_be_bytes());
-    buffer[6..10].copy_from_slice(&(frame_index as u32).to_be_bytes());
-    buffer[10..14].copy_from_slice(&shards_count.to_be_bytes());
-    buffer[14..18].copy_from_slice(&shard_index.to_be_bytes());
-
-    // Write header if present (first shard only)
-    if let Some(hdr) = header_bytes {
-        buffer[LATENCY_TEST_SHARD_PREFIX_SIZE..LATENCY_TEST_SHARD_PREFIX_SIZE + hdr.len()]
-            .copy_from_slice(&hdr);
+    while recv_running.load(Ordering::Relaxed) {
+        match stream_socket.recv() {
+            Ok(()) => (),
+            Err(ConnectionError::TryAgain(_)) => continue,
+            Err(e) => {
+                warn!("Latency test data receive error: {}", e);
+                running.store(false, Ordering::Relaxed);
+                break;
+            }
+        }
     }
-
-    // Data portion is already zeroed
 }
 
 fn run_latency_test(
@@ -197,13 +193,11 @@ fn run_latency_test(
     config: LatencyTestConfig,
     running: Arc<AtomicBool>,
 ) -> Result<()> {
-    // Send start command to client
     send_message(
         &mut stream,
         &LatencyTestControlMessage::StartTest(config.clone()),
     )?;
 
-    // Wait for ack
     match recv_message(&mut stream) {
         Ok(LatencyTestControlMessage::Ack) => {
             info!("Client acknowledged latency test start");
@@ -217,7 +211,6 @@ fn run_latency_test(
         }
     }
 
-    // Create CSV file for logging
     let mut csv_writer = match create_csv_file(&config) {
         Ok(w) => Some(w),
         Err(e) => {
@@ -226,157 +219,102 @@ fn run_latency_test(
         }
     };
 
-    // Setup UDP socket for data plane
     let client_ip: IpAddr = config.client_ip.parse()?;
-    let udp_socket = Socket::new(Domain::IPV4, Type::DGRAM, None)?;
-    udp_socket.set_reuse_address(true)?;
-    let udp_local_addr: SocketAddr = format!("0.0.0.0:{}", LATENCY_TEST_DATA_PORT).parse()?;
-    udp_socket.bind(&udp_local_addr.into())?;
-    udp_socket.set_read_timeout(Some(UDP_RECV_TIMEOUT))?;
-    let udp_socket: UdpSocket = udp_socket.into();
+    let mut stream_socket = StreamSocketBuilder::connect_to_client(
+        DATA_RECV_TIMEOUT,
+        client_ip,
+        LATENCY_TEST_DATA_PORT,
+        SocketProtocol::Udp,
+        None,
+        SocketBufferSize::Maximum,
+        SocketBufferSize::Maximum,
+        LATENCY_TEST_MAX_PACKET_SIZE,
+    )
+    .map_err(|e| alvr_common::anyhow::anyhow!("{e}"))?;
 
-    let mut udp_remote_addr = SocketAddr::new(client_ip, LATENCY_TEST_DATA_PORT);
-    info!(
-        "UDP data plane ready: local={}, remote={}",
-        udp_local_addr, udp_remote_addr
-    );
+    let mut frame_sender: StreamSender<LatencyTestFrameHeader> =
+        stream_socket.request_stream(LATENCY_TEST_FRAME_STREAM_ID);
+    let mut sensor_receiver: StreamReceiver<LatencyTestSensorPacket> =
+        stream_socket.subscribe_to_stream(LATENCY_TEST_SENSOR_STREAM_ID, MAX_UNREAD_FRAMES);
 
-    let frame_size_bytes = config.frame_size_kb as usize * 1024;
-    // Add 500 ms grace period so the server keeps reading UDP sensor packets
-    // until the client has finished sending all its frames.  The client uses
-    // count-based termination and may still be sending the very last frames
-    // when the nominal duration expires on the server side.
-    let test_duration = Duration::from_secs(config.duration_secs as u64) + Duration::from_millis(500);
-
-    // Calculate shards count (matching ALVR's logic)
-    let header_size = bincode::serialized_size(&LatencyTestFrameHeader {
-        client_send_timestamp_ns: 0,
-        server_recv_timestamp_ns: 0,
-        server_send_timestamp_ns: 0,
-    })? as usize;
-
-    // First shard has header, subsequent shards are pure data
-    let first_shard_data = LATENCY_TEST_MAX_SHARD_DATA_SIZE - header_size;
-    let shards_count = if frame_size_bytes <= first_shard_data {
-        1
-    } else {
-        let remaining = frame_size_bytes - first_shard_data;
-        1 + ((remaining as f64) / (LATENCY_TEST_MAX_SHARD_DATA_SIZE as f64)).ceil() as u32
+    let recv_running = Arc::new(AtomicBool::new(true));
+    let recv_thread = {
+        let recv_running = Arc::clone(&recv_running);
+        let running = Arc::clone(&running);
+        thread::spawn(move || {
+            data_receive_loop(stream_socket, recv_running, running);
+        })
     };
 
+    let frame_size_bytes = config.frame_size_kb as usize * 1024;
+    let test_duration =
+        Duration::from_secs(config.duration_secs as u64) + Duration::from_millis(500);
+    let expected_shards_count = calculate_expected_shards_count(config.frame_size_kb)?;
+
     info!(
-        "Starting latency test: frame_size={}KB ({} shards), rate={}Hz, duration={}s, max_packet={}",
-        config.frame_size_kb, shards_count, config.frame_rate_hz, config.duration_secs,
+        "Starting latency test via StreamSocket: frame_size={}KB ({} shards), rate={}Hz, duration={}s, max_packet={}",
+        config.frame_size_kb,
+        expected_shards_count,
+        config.frame_rate_hz,
+        config.duration_secs,
         LATENCY_TEST_MAX_PACKET_SIZE
     );
 
-    // Track which frame_indices the server actually sent shards for.
-    // Key = frame_index, Value = shards_count sent.
-    // Used to distinguish "client uplink lost" (frame absent) from
-    // "server downlink lost" (frame present but client received 0 shards).
     let mut frames_sent: HashMap<u64, u32> = HashMap::new();
 
     let start_time = Instant::now();
-    let mut recv_buf = vec![0u8; 65535];
-    let mut shard_buf = Vec::with_capacity(LATENCY_TEST_MAX_PACKET_SIZE);
-    let mut warmup_buf = Vec::with_capacity(LATENCY_TEST_MAX_PACKET_SIZE);
-    let mut last_warmup_send = Instant::now() - Duration::from_secs(1);
-    let warmup_interval = Duration::from_millis(200);
     let mut last_tcp_check = Instant::now();
     let tcp_check_interval = Duration::from_millis(50);
 
-    // Main test loop - receive sensor packets, send frame shards
     while running.load(Ordering::Relaxed) && start_time.elapsed() < test_duration {
-        if last_warmup_send.elapsed() >= warmup_interval {
-            // Warm up the reverse path so client can learn the real source address
-            // instead of inferring from TCP peer address under NAT/hairpin.
-            build_shard(&mut warmup_buf, 0, 0, 0, 1, None, 0);
-            if let Err(e) = udp_socket.send_to(&warmup_buf, udp_remote_addr) {
-                warn!("Failed to send UDP warmup packet: {}", e);
-            }
-            last_warmup_send = Instant::now();
-        }
-
-        // Try to receive sensor packet from client
-        match udp_socket.recv_from(&mut recv_buf) {
-            Ok((size, source_addr)) => {
-                if source_addr != udp_remote_addr {
-                    info!(
-                        "Latency test UDP peer updated: {} -> {}",
-                        udp_remote_addr, source_addr
-                    );
-                    udp_remote_addr = source_addr;
-                }
+        match sensor_receiver.recv(DATA_RECV_TIMEOUT) {
+            Ok(packet) => {
+                let sensor_packet = match packet.get_header() {
+                    Ok(packet) => packet,
+                    Err(e) => {
+                        warn!("Failed to decode latency test sensor packet: {}", e);
+                        continue;
+                    }
+                };
 
                 let server_recv_time = start_time.elapsed().as_nanos() as u64;
-                if let Ok(sensor_packet) =
-                    bincode::deserialize::<LatencyTestSensorPacket>(&recv_buf[..size])
-                {
-                    let server_send_time = start_time.elapsed().as_nanos() as u64;
+                let server_send_time = start_time.elapsed().as_nanos() as u64;
+                let header = LatencyTestFrameHeader {
+                    frame_index: sensor_packet.frame_index,
+                    client_send_timestamp_ns: sensor_packet.client_send_timestamp_ns,
+                    server_recv_timestamp_ns: server_recv_time,
+                    server_send_timestamp_ns: server_send_time,
+                };
 
-                    // Send frame as multiple shards
-                    let mut remaining_data = frame_size_bytes;
-
-                    for shard_idx in 0..shards_count {
-                        let (header, data_size) = if shard_idx == 0 {
-                            // First shard includes header
-                            let hdr = LatencyTestFrameHeader {
-                                client_send_timestamp_ns: sensor_packet.client_send_timestamp_ns,
-                                server_recv_timestamp_ns: server_recv_time,
-                                server_send_timestamp_ns: server_send_time,
-                            };
-                            let ds = remaining_data.min(first_shard_data);
-                            remaining_data = remaining_data.saturating_sub(ds);
-                            (Some(hdr), ds)
-                        } else {
-                            let ds = remaining_data.min(LATENCY_TEST_MAX_SHARD_DATA_SIZE);
-                            remaining_data = remaining_data.saturating_sub(ds);
-                            (None, ds)
-                        };
-
-                        build_shard(
-                            &mut shard_buf,
-                            LATENCY_TEST_STREAM_ID,
-                            sensor_packet.frame_index,
-                            shard_idx,
-                            shards_count,
-                            header.as_ref(),
-                            data_size,
-                        );
-
-                        if let Err(e) = udp_socket.send_to(&shard_buf, udp_remote_addr) {
-                            warn!(
-                                "Failed to send shard {}/{}: {}",
-                                shard_idx, shards_count, e
-                            );
-                        }
+                let mut buffer = match frame_sender.get_buffer(&header) {
+                    Ok(buffer) => buffer,
+                    Err(e) => {
+                        warn!("Failed to allocate latency test frame buffer: {}", e);
+                        break;
                     }
+                };
+                buffer.set_len(frame_size_bytes);
 
-                    // Record that the server sent shards for this frame.
-                    frames_sent.insert(sensor_packet.frame_index, shards_count);
+                if let Err(e) = frame_sender.send(buffer) {
+                    warn!("Failed to send latency test frame: {}", e);
+                    break;
                 }
+
+                frames_sent.insert(sensor_packet.frame_index, expected_shards_count);
             }
-            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                // No data available, continue
-            }
+            Err(ConnectionError::TryAgain(_)) => {}
             Err(e) => {
-                warn!("UDP recv error: {}", e);
+                warn!("Latency test sensor receive error: {}", e);
+                break;
             }
         }
 
-        // Batch-drain frame reports from client via TCP (rate-limited)
         if last_tcp_check.elapsed() >= tcp_check_interval {
             let mut should_break = false;
             while let Some(msg) = try_recv_message(&mut stream) {
                 match msg {
                     LatencyTestControlMessage::FrameReport(report) => {
-                        // Use server-side shards_sent: if the server never
-                        // received the sensor packet for this frame it records
-                        // 0 (uplink loss), otherwise it records the actual
-                        // shards_count it sent (downlink may still be lossy).
-                        let server_shards_sent = frames_sent
-                            .remove(&report.frame_index)
-                            .unwrap_or(0);
+                        let server_shards_sent = frames_sent.remove(&report.frame_index).unwrap_or(0);
                         if let Some(ref mut writer) = csv_writer {
                             if let Err(e) = writeln!(
                                 writer,
@@ -405,9 +343,9 @@ fn run_latency_test(
         }
     }
 
-    // Send stop command, then keep draining FrameReports until the client
-    // sends TestComplete (or a 3-second deadline expires).  The client needs
-    // time to receive in-flight shards and report the last few frames back.
+    recv_running.store(false, Ordering::Relaxed);
+    recv_thread.join().ok();
+
     send_message(&mut stream, &LatencyTestControlMessage::StopTest)?;
 
     let drain_deadline = Instant::now() + Duration::from_secs(3);
@@ -443,12 +381,10 @@ fn run_latency_test(
                 if !is_timeout {
                     break;
                 }
-                // read timeout — keep draining until deadline
             }
         }
     }
 
-    // Flush and close CSV file
     if let Some(ref mut writer) = csv_writer {
         writer.flush().ok();
     }

@@ -402,12 +402,15 @@ pub struct LatencyTestSensorPacket {
 // Shard format constants (matching ALVR's stream_socket)
 pub const LATENCY_TEST_SHARD_PREFIX_SIZE: usize = 18; // 4 + 2 + 4 + 4 + 4
 pub const LATENCY_TEST_MAX_PACKET_SIZE: usize = 1400;
-pub const LATENCY_TEST_MAX_SHARD_DATA_SIZE: usize = LATENCY_TEST_MAX_PACKET_SIZE - LATENCY_TEST_SHARD_PREFIX_SIZE;
-pub const LATENCY_TEST_STREAM_ID: u16 = 100; // dedicated stream ID for latency test
+pub const LATENCY_TEST_MAX_SHARD_DATA_SIZE: usize =
+    LATENCY_TEST_MAX_PACKET_SIZE - LATENCY_TEST_SHARD_PREFIX_SIZE;
+pub const LATENCY_TEST_SENSOR_STREAM_ID: u16 = 100;
+pub const LATENCY_TEST_FRAME_STREAM_ID: u16 = 101;
 
-/// Header embedded in the first shard's data section
+/// Header embedded in the latency-test frame packet
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct LatencyTestFrameHeader {
+    pub frame_index: u64,
     pub client_send_timestamp_ns: u64,
     pub server_recv_timestamp_ns: u64,
     pub server_send_timestamp_ns: u64,
