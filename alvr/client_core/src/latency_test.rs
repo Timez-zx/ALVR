@@ -419,10 +419,12 @@ fn run_latency_test(
         config.frame_rate_hz, config.frame_size_kb, expected_shards_count, config.duration_secs
     );
 
-    // Setup UDP socket with large receive buffer
+    // Setup UDP socket — request maximum buffer sizes (OS will cap to system limit),
+    // matching ALVR's SocketBufferSize::Maximum behaviour.
     let udp_socket = Socket::new(Domain::IPV4, Type::DGRAM, None)?;
     udp_socket.set_reuse_address(true)?;
-    udp_socket.set_recv_buffer_size(2 * 1024 * 1024)?;
+    udp_socket.set_recv_buffer_size(u32::MAX as usize).ok();
+    udp_socket.set_send_buffer_size(u32::MAX as usize).ok();
     let udp_local_addr: SocketAddr = format!("0.0.0.0:{}", LATENCY_TEST_DATA_PORT).parse()?;
     udp_socket.bind(&udp_local_addr.into())?;
     udp_socket.set_read_timeout(Some(UDP_RECV_TIMEOUT))?;
