@@ -242,7 +242,11 @@ fn run_latency_test(
     );
 
     let frame_size_bytes = config.frame_size_kb as usize * 1024;
-    let test_duration = Duration::from_secs(config.duration_secs as u64);
+    // Add 500 ms grace period so the server keeps reading UDP sensor packets
+    // until the client has finished sending all its frames.  The client uses
+    // count-based termination and may still be sending the very last frames
+    // when the nominal duration expires on the server side.
+    let test_duration = Duration::from_secs(config.duration_secs as u64) + Duration::from_millis(500);
 
     // Calculate shards count (matching ALVR's logic)
     let header_size = bincode::serialized_size(&LatencyTestFrameHeader {
@@ -401,13 +405,53 @@ fn run_latency_test(
         }
     }
 
+    // Send stop command, then keep draining FrameReports until the client
+    // sends TestComplete (or a 3-second deadline expires).  The client needs
+    // time to receive in-flight shards and report the last few frames back.
+    send_message(&mut stream, &LatencyTestControlMessage::StopTest)?;
+
+    let drain_deadline = Instant::now() + Duration::from_secs(3);
+    stream.set_read_timeout(Some(Duration::from_millis(100))).ok();
+    while Instant::now() < drain_deadline {
+        match recv_message(&mut stream) {
+            Ok(LatencyTestControlMessage::FrameReport(report)) => {
+                let server_shards_sent = frames_sent.remove(&report.frame_index).unwrap_or(0);
+                if let Some(ref mut writer) = csv_writer {
+                    writeln!(
+                        writer,
+                        "{},{},{},{}",
+                        report.frame_index,
+                        server_shards_sent,
+                        report.shards_received,
+                        report.rtt_us
+                    )
+                    .ok();
+                }
+            }
+            Ok(LatencyTestControlMessage::TestComplete) => {
+                info!("Received TestComplete from client");
+                break;
+            }
+            Ok(_) => {}
+            Err(ref e) => {
+                let is_timeout = e
+                    .downcast_ref::<std::io::Error>()
+                    .map_or(false, |io| {
+                        io.kind() == std::io::ErrorKind::TimedOut
+                            || io.kind() == std::io::ErrorKind::WouldBlock
+                    });
+                if !is_timeout {
+                    break;
+                }
+                // read timeout — keep draining until deadline
+            }
+        }
+    }
+
     // Flush and close CSV file
     if let Some(ref mut writer) = csv_writer {
         writer.flush().ok();
     }
-
-    // Send stop command
-    send_message(&mut stream, &LatencyTestControlMessage::StopTest)?;
 
     info!("Latency test completed");
 

@@ -539,7 +539,18 @@ fn run_latency_test(
     }
 
     // ── Shutdown (channel-driven, no extra AtomicBools needed) ────────
-    // 1. Stop recv thread → its event_tx clone is dropped on exit.
+    // 1. Wait for in-flight shards to arrive before stopping the recv thread.
+    //    Send periodic keepalive packets to the server during this window so
+    //    the Android WiFi chip does not enter Power Save Mode (PSM) and drop
+    //    the incoming shard burst for the last frame(s).
+    let grace_end = Instant::now() + Duration::from_millis(500);
+    while Instant::now() < grace_end {
+        // A minimal UDP send keeps the radio in active RX mode.  The server
+        // will attempt to deserialize this as a sensor packet; the payload is
+        // too short so it will be silently ignored.
+        udp_socket.send_to(&[0u8; 1], udp_remote_addr).ok();
+        thread::sleep(Duration::from_millis(20));
+    }
     recv_running.store(false, Ordering::Relaxed);
     recv_thread.join().ok();
 
