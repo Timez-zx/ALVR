@@ -382,6 +382,26 @@ fn run_latency_test(
     let frame_receiver: StreamReceiver<LatencyTestFrameHeader> =
         stream_socket.subscribe_to_stream(LATENCY_TEST_FRAME_STREAM_ID, MAX_UNREAD_FRAMES);
 
+    // Wait for the server to signal that its UDP socket is ready before sending
+    // any data. Without this, the first sensor packets may arrive at the server
+    // before it has bound its UDP port, triggering an ICMP Port Unreachable
+    // that tears down this client's connected UDP socket (ECONNREFUSED). This
+    // race is invisible over WiFi but reliably triggers over low-latency links
+    // such as USB ethernet.
+    match recv_message(stream) {
+        Ok(LatencyTestControlMessage::DataReady) => {
+            info!("Received DataReady from server, starting sensor sends");
+        }
+        Ok(other) => {
+            error!("Expected DataReady, got {:?}", other);
+            return Ok(());
+        }
+        Err(e) => {
+            error!("Failed to receive DataReady: {}", e);
+            return Err(e);
+        }
+    }
+
     let stop_flag = Arc::new(AtomicBool::new(false));
     let recv_running = Arc::new(AtomicBool::new(true));
     let sent_frame_count = Arc::new(AtomicU64::new(0));

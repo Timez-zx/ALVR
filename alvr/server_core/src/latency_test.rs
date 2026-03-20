@@ -211,14 +211,6 @@ fn run_latency_test(
         }
     }
 
-    let mut csv_writer = match create_csv_file(&config) {
-        Ok(w) => Some(w),
-        Err(e) => {
-            error!("Failed to create CSV file: {}", e);
-            None
-        }
-    };
-
     let client_ip: IpAddr = config.client_ip.parse()?;
     let mut stream_socket = StreamSocketBuilder::connect_to_client(
         DATA_RECV_TIMEOUT,
@@ -231,6 +223,21 @@ fn run_latency_test(
         LATENCY_TEST_MAX_PACKET_SIZE,
     )
     .map_err(|e| alvr_common::anyhow::anyhow!("{e}"))?;
+
+    // Notify client that the server UDP socket is bound and ready. The client
+    // must not send any sensor packets before receiving this signal, otherwise
+    // the first packets may arrive before the socket is open and the resulting
+    // ICMP Port Unreachable tears down the client's connected UDP socket.
+    send_message(&mut stream, &LatencyTestControlMessage::DataReady)?;
+    info!("Sent DataReady to client");
+
+    let mut csv_writer = match create_csv_file(&config) {
+        Ok(w) => Some(w),
+        Err(e) => {
+            error!("Failed to create CSV file: {}", e);
+            None
+        }
+    };
 
     let mut frame_sender: StreamSender<LatencyTestFrameHeader> =
         stream_socket.request_stream(LATENCY_TEST_FRAME_STREAM_ID);

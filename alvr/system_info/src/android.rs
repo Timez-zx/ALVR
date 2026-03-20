@@ -101,31 +101,110 @@ fn get_system_service<'a>(env: &mut JNIEnv<'a>, service_name: &str) -> JObject<'
     .unwrap()
 }
 
-// Note: tried and failed to use libc
-pub fn local_ip() -> IpAddr {
+// Enumerate all non-loopback IPv4 addresses across all active network interfaces.
+// This picks up ethernet-over-USB adapters and other non-WiFi interfaces that
+// WifiManager.getConnectionInfo() would miss.
+pub fn local_ips() -> Vec<IpAddr> {
     let vm = vm();
     let mut env = vm.attach_current_thread().unwrap();
 
-    let wifi_manager = get_system_service(&mut env, "wifi");
-    let wifi_info = env
-        .call_method(
-            wifi_manager,
-            "getConnectionInfo",
-            "()Landroid/net/wifi/WifiInfo;",
-            &[],
-        )
-        .unwrap()
-        .l()
-        .unwrap();
-    let ip_i32 = env
-        .call_method(wifi_info, "getIpAddress", "()I", &[])
-        .unwrap()
-        .i()
-        .unwrap();
+    let mut ips = Vec::new();
 
-    let ip_arr = ip_i32.to_le_bytes();
+    let Ok(ni_class) = env.find_class("java/net/NetworkInterface") else {
+        return ips;
+    };
+    let Ok(interfaces_jv) =
+        env.call_static_method(ni_class, "getNetworkInterfaces", "()Ljava/util/Enumeration;", &[])
+    else {
+        return ips;
+    };
+    let Ok(interfaces) = interfaces_jv.l() else {
+        return ips;
+    };
 
-    IpAddr::V4(Ipv4Addr::new(ip_arr[0], ip_arr[1], ip_arr[2], ip_arr[3]))
+    loop {
+        let has_more = env
+            .call_method(&interfaces, "hasMoreElements", "()Z", &[])
+            .and_then(|v| v.z())
+            .unwrap_or(false);
+        if !has_more {
+            break;
+        }
+
+        let Ok(iface) = env
+            .call_method(&interfaces, "nextElement", "()Ljava/lang/Object;", &[])
+            .and_then(|v| v.l())
+        else {
+            continue;
+        };
+
+        let is_loopback = env
+            .call_method(&iface, "isLoopback", "()Z", &[])
+            .and_then(|v| v.z())
+            .unwrap_or(true);
+        if is_loopback {
+            continue;
+        }
+
+        let is_up = env
+            .call_method(&iface, "isUp", "()Z", &[])
+            .and_then(|v| v.z())
+            .unwrap_or(false);
+        if !is_up {
+            continue;
+        }
+
+        let Ok(addrs) = env
+            .call_method(&iface, "getInetAddresses", "()Ljava/util/Enumeration;", &[])
+            .and_then(|v| v.l())
+        else {
+            continue;
+        };
+
+        loop {
+            let has_more_addr = env
+                .call_method(&addrs, "hasMoreElements", "()Z", &[])
+                .and_then(|v| v.z())
+                .unwrap_or(false);
+            if !has_more_addr {
+                break;
+            }
+
+            let Ok(addr_obj) = env
+                .call_method(&addrs, "nextElement", "()Ljava/lang/Object;", &[])
+                .and_then(|v| v.l())
+            else {
+                continue;
+            };
+
+            // Use getHostAddress() (returns a String) to avoid byte-array JNI complexity.
+            let Ok(host_jv) = env
+                .call_method(&addr_obj, "getHostAddress", "()Ljava/lang/String;", &[])
+                .and_then(|v| v.l())
+            else {
+                continue;
+            };
+            let host_jstr: jni::objects::JString = host_jv.into();
+            let Ok(host_str) = env.get_string(&host_jstr) else {
+                continue;
+            };
+            let host = host_str.to_string_lossy();
+
+            // Only keep plain IPv4 addresses (no scope-id suffix).
+            if let Ok(ip @ IpAddr::V4(_)) = host.parse::<IpAddr>() {
+                ips.push(ip);
+            }
+        }
+    }
+
+    ips
+}
+
+pub fn local_ip() -> IpAddr {
+    local_ips()
+        .into_iter()
+        .next()
+        .unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED))
 }
 
 // This is needed to avoid wifi scans that disrupt streaming.

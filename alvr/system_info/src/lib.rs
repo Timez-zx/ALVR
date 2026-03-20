@@ -185,6 +185,13 @@ pub fn platform() -> Platform {
 }
 
 #[cfg(not(target_os = "android"))]
+pub fn local_ips() -> Vec<std::net::IpAddr> {
+    local_ip_address::list_afinet_netifas()
+        .map(|pairs| pairs.into_iter().map(|(_, ip)| ip).collect())
+        .unwrap_or_default()
+}
+
+#[cfg(not(target_os = "android"))]
 pub fn local_ip() -> std::net::IpAddr {
     use std::net::{IpAddr, Ipv4Addr};
 

@@ -434,6 +434,9 @@ pub enum LatencyTestControlMessage {
     StopTest,
     /// Client acknowledges the command
     Ack,
+    /// Server signals that its UDP socket is bound and ready to receive data.
+    /// Client must wait for this before sending any sensor packets.
+    DataReady,
     /// Client reports per-frame statistics
     FrameReport(LatencyTestFrameReport),
     /// Test completed
