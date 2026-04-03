@@ -145,7 +145,7 @@ fn create_csv_file(config: &LatencyTestConfig) -> Result<BufWriter<File>> {
     let file = File::create(&path)?;
     let mut writer = BufWriter::new(file);
 
-    writeln!(writer, "frame_index,shards_sent,shards_received,rtt_us")?;
+    writeln!(writer, "frame_index,shards_sent,shards_received,client_send_timestamp_ns,server_recv_timestamp_ns,rtt_us")?;
     writer.flush()?;
 
     info!("Created latency test CSV file: {}", path.display());
@@ -267,7 +267,7 @@ fn run_latency_test(
         LATENCY_TEST_MAX_PACKET_SIZE
     );
 
-    let mut frames_sent: HashMap<u64, u32> = HashMap::new();
+    let mut frames_sent: HashMap<u64, (u32, u64, u64)> = HashMap::new(); // (shards, client_send_ts, server_recv_ts)
 
     let start_time = Instant::now();
     let mut last_tcp_check = Instant::now();
@@ -307,7 +307,7 @@ fn run_latency_test(
                     break;
                 }
 
-                frames_sent.insert(sensor_packet.frame_index, expected_shards_count);
+                frames_sent.insert(sensor_packet.frame_index, (expected_shards_count, sensor_packet.client_send_timestamp_ns, server_recv_time));
             }
             Err(ConnectionError::TryAgain(_)) => {}
             Err(e) => {
@@ -321,14 +321,17 @@ fn run_latency_test(
             while let Some(msg) = try_recv_message(&mut stream) {
                 match msg {
                     LatencyTestControlMessage::FrameReport(report) => {
-                        let server_shards_sent = frames_sent.remove(&report.frame_index).unwrap_or(0);
+                        let (server_shards_sent, client_send_ts, server_recv_ts) =
+                            frames_sent.remove(&report.frame_index).unwrap_or((0, 0, 0));
                         if let Some(ref mut writer) = csv_writer {
                             if let Err(e) = writeln!(
                                 writer,
-                                "{},{},{},{}",
+                                "{},{},{},{},{},{}",
                                 report.frame_index,
                                 server_shards_sent,
                                 report.shards_received,
+                                client_send_ts,
+                                server_recv_ts,
                                 report.rtt_us
                             ) {
                                 error!("Failed to write to CSV: {}", e);
@@ -360,13 +363,16 @@ fn run_latency_test(
     while Instant::now() < drain_deadline {
         match recv_message(&mut stream) {
             Ok(LatencyTestControlMessage::FrameReport(report)) => {
-                let server_shards_sent = frames_sent.remove(&report.frame_index).unwrap_or(0);
+                let (server_shards_sent, client_send_ts, server_recv_ts) =
+                    frames_sent.remove(&report.frame_index).unwrap_or((0, 0, 0));
                 if let Some(ref mut writer) = csv_writer {
                     writeln!(
                         writer,
-                        "{},{},{},{}",
+                        "{},{},{},{},{},{}",
                         report.frame_index,
                         server_shards_sent,
+                        client_send_ts,
+                        server_recv_ts,
                         report.shards_received,
                         report.rtt_us
                     )
